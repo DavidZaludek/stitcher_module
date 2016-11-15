@@ -25,8 +25,9 @@ Copy stitcher_module form Modules/ to yuri modules add stitcher_module to CMakeL
 
 - **5x1600x900**  -> 1.8 fps (without GPU,with blending,with exposure compensate)
 - **5x1600x900**  -> 1.8 fps (with GPU slower probably because OpenCV is not optimized for such usage.)
+- **5x1600x900**  -> 12.5 fps (without GPU,without blending,without exposure compensate , this setting gives best framerate and is still visualy apealing when exposure is set manualy)
 
->It is possible to achieve better performance by disabling blending and exposure. Exposure compensate can be disabled when u set it manaualy in camera options, for that we used set_cam.sh which is included in configs.
+>It is possible to achieve better performance by disabling blending and exposure. Exposure compensate can be disabled when u set it manualy in camera options, for that we used set_cam.sh which is included in configs.
 
 
 **Usage:** 
