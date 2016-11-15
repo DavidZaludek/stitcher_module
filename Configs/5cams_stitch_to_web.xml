@@ -90,9 +90,9 @@
     <node class="stitcher_module" name="comb0">
         <parameter name="fps_stats">@stats</parameter>
         <parameter name="GPU">0</parameter>
-        <parameter name="cam_count">4</parameter>
+        <parameter name="cam_count">5</parameter>
         <parameter name="Blender">1</parameter>
-        <parameter name="Exposure_compensate">0</parameter>
+        <parameter name="Exposure_compensate">1</parameter>
     </node>
     <!-- Prepare for web -->
     <node class="jpeg_encoder" name="enc0">
