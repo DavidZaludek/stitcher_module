@@ -10,7 +10,7 @@ Stitcher takes in images in jpeg format and outputs one composed by stitching in
 
 Install: 
 
-Copy stitcher_module form Modules/ to yuri modules add file to CMakeLists.txt in yuri modules.
+Copy stitcher_module form Modules/ to yuri modules add stitcher_module to CMakeLists.txt in yuri modules.
 
 Run flags: 
 
@@ -27,6 +27,7 @@ Exposure_compensate - Use exposure compensator to set images exposure(1 - true/0
 Current Framerates after procesing times: 
 
 5x1600x900 -> 5.5 fps (without GPU,with blending,with exposure compensate)
+
 5x1600x900 -> 1.8 fps (with GPU slower probably because OpenCV is not optimized for such usage.)
 
 It is possible to achieve better performance by disabling blending and exposure. Exposure compensate can be disabled when u set it manaualy in camera options, for that we used set_cam.sh which is included in configs.
