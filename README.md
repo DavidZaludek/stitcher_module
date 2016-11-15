@@ -2,7 +2,8 @@
 
 **Introduction:** 
 
-Stitcher module implemets OpenCV 3.0.0 stitching with catching of some precomputed values into yuri2.
+Stitcher module implemets OpenCV 3.0.0 stitching with catching of some precomputed values into yuri2 (https://projects.iim.cz/yuri) .
+
 
 **Use-case:** 
 
