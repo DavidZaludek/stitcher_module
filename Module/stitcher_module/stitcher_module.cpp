@@ -89,6 +89,18 @@ std::vector<core::pFrame> stitcher_module::do_single_step(std::vector<core::pFra
     		stitcher.setSeamFinder(cv::makePtr<cv::detail::GraphCutSeamFinderGpu>());
        	}else {
 
+            if (Exposure_compensate_){
+                stitcher.setExposureCompensator(cv::makePtr<cv::detail::GainCompensator>());
+            }
+            else {
+                stitcher.setExposureCompensator(cv::makePtr<cv::detail::NoExposureCompensator>());
+            }
+
+            if (Blender_)
+                stitcher.setBlender(cv::makePtr<cv::detail::FeatherBlender>(true));
+            else
+                stitcher.setBlender(cv::detail::Blender::createDefault(cv::detail::Blender::NO, true));
+
        		if(Warper_ == 0)
     		  stitcher.setWarper(cv::makePtr<cv::CylindricalWarper>());
     		else if (Warper_ == 1)
