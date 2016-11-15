@@ -2,14 +2,15 @@
 
 **Introduction:** 
 
->Stitcher module implemets OpenCV 3.0.0 stitching with catching of some precomputed values into yuri2.
+Stitcher module implemets OpenCV 3.0.0 stitching with catching of some precomputed values into yuri2.
 
 **Use-case:** 
 
->Stitcher takes in images in jpeg format and outputs one composed by stitching inputs together. Module is aplicable only to cameras which dont change relative position to eachother other-wise image becames distorted, this is because module only calculates positioning of images at the start of the module. Best results of stitching can be achieved on lanscapes with cameras focused to distance.
+Stitcher takes in images in jpeg format and outputs one composed by stitching inputs together. Module is aplicable only to cameras which dont change relative position to eachother other-wise image becames distorted, this is because module only calculates positioning of images at the start of the module. Best results of stitching can be achieved on lanscapes with cameras focused to distance.
 
 **Install:** 
->Copy stitcher_module form Modules/ to yuri modules add stitcher_module to CMakeLists.txt in yuri modules.
+
+Copy stitcher_module form Modules/ to yuri modules add stitcher_module to CMakeLists.txt in yuri modules.
 
 **Run flags:**  
 
@@ -24,7 +25,7 @@
 - **5x1600x900**  -> 5.5 fps (without GPU,with blending,with exposure compensate)
 - **5x1600x900**  -> 1.8 fps (with GPU slower probably because OpenCV is not optimized for such usage.)
 
-It is possible to achieve better performance by disabling blending and exposure. Exposure compensate can be disabled when u set it manaualy in camera options, for that we used set_cam.sh which is included in configs.
+>It is possible to achieve better performance by disabling blending and exposure. Exposure compensate can be disabled when u set it manaualy in camera options, for that we used set_cam.sh which is included in configs.
 
 
 **Usage:** 
