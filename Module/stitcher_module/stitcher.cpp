@@ -1,817 +1,205 @@
-/*M///////////////////////////////////////////////////////////////////////////////////////
-//
-//  IMPORTANT: READ BEFORE DOWNLOADING, COPYING, INSTALLING OR USING.
-//
-//  By downloading, copying, installing or using the software you agree to this
-license.
-//  If you do not agree to this license, do not download, install,
-//  copy or use the software.
-//
-//
-//                          License Agreement
-//                For Open Source Computer Vision Library
-//
-// Copyright (C) 2000-2008, Intel Corporation, all rights reserved.
-// Copyright (C) 2009, Willow Garage Inc., all rights reserved.
-// Third party copyrights are property of their respective owners.
-//
-// Redistribution and use in source and binary forms, with or without
-modification,
-// are permitted provided that the following conditions are met:
-//
-//   * Redistribution's of source code must retain the above copyright notice,
-//     this list of conditions and the following disclaimer.
-//
-//   * Redistribution's in binary form must reproduce the above copyright
-notice,
-//     this list of conditions and the following disclaimer in the documentation
-//     and/or other materials provided with the distribution.
-//
-//   * The name of the copyright holders may not be used to endorse or promote
-products
-//     derived from this software without specific prior written permission.
-//
-// This software is provided by the copyright holders and contributors "as is"
-and
-// any express or implied warranties, including, but not limited to, the implied
-// warranties of merchantability and fitness for a particular purpose are
-disclaimed.
-// In no event shall the Intel Corporation or contributors be liable for any
-direct,
-// indirect, incidental, special, exemplary, or consequential damages
-// (including, but not limited to, procurement of substitute goods or services;
-// loss of use, data, or profits; or business interruption) however caused
-// and on any theory of liability, whether in contract, strict liability,
-// or tort (including negligence or otherwise) arising in any way out of
-// the use of this software, even if advised of the possibility of such damage.
-//
-//M*/
+/*!
+ * @file 		stitcher_module.cpp
+ * @author 		
+ * @date 		11.2.2013
+ * @date		16.2.2013
+ * @copyright	Institute of Intermedia, CTU in Prague, 2013
+ * 				Distributed under modified BSD Licence, details in file doc/LICENSE
+ *
+ */
 
-#include "precomp.hpp"
+#include "stitcher_module.h"
+#include "yuri/core/Module.h"
+#include "yuri/core/frame/RawVideoFrame.h"
+#include "yuri/core/frame/raw_frame_types.h"
+#include "yuri/core/frame/raw_frame_params.h"
 
-namespace cv {
 
-Stitcher Stitcher::createDefault(bool try_use_cuda) {
-  Stitcher stitcher;
-  stitcher.setRegistrationResol(-1);
-  stitcher.setSeamEstimationResol(1);
-  stitcher.setCompositingResol(ORIG_RESOL);
-  stitcher.setPanoConfidenceThresh(0.5);
-  stitcher.setWaveCorrection(true);
-  stitcher.setWaveCorrectKind(detail::WAVE_CORRECT_HORIZ);
-  stitcher.setFeaturesMatcher(
-      makePtr<detail::BestOf2NearestMatcher>(try_use_cuda));
-  stitcher.setBundleAdjuster(makePtr<detail::BundleAdjusterRay>());
-  stitcher.setFeaturesFinder(makePtr<detail::SurfFeaturesFinder>());
+namespace yuri {
+namespace stitcher_module {
 
-#ifdef HAVE_CUDA
-  if (try_use_cuda && cuda::getCudaEnabledDeviceCount() > 0) {
-#ifdef HAVE_OPENCV_XFEATURES2D
-    stitcher.setFeaturesFinder(makePtr<detail::SurfFeaturesFinderGpu>());
-#else
-    stitcher.setFeaturesFinder(makePtr<detail::OrbFeaturesFinder>());
-#endif
-    stitcher.setWarper(makePtr<SphericalWarperGpu>());
-    stitcher.setSeamFinder(makePtr<detail::GraphCutSeamFinderGpu>());
-  } else
-#endif
-  {
-#ifdef HAVE_OPENCV_XFEATURES2D
-    stitcher.setFeaturesFinder(makePtr<detail::SurfFeaturesFinder>());
-#else
-    stitcher.setFeaturesFinder(makePtr<detail::OrbFeaturesFinder>());
-#endif
-    stitcher.setWarper(makePtr<SphericalWarper>());
-    stitcher.setSeamFinder(makePtr<detail::GraphCutSeamFinder>(
-        detail::GraphCutSeamFinderBase::COST_COLOR));
-  }
+IOTHREAD_GENERATOR(stitcher_module)
 
-  stitcher.setExposureCompensator(makePtr<detail::BlocksGainCompensator>());
+MODULE_REGISTRATION_BEGIN("stitcher_module")
+		REGISTER_IOTHREAD("stitcher_module",stitcher_module)
+MODULE_REGISTRATION_END()
 
-  stitcher.setBlender(
-      cv::detail::Blender::createDefault(cv::detail::Blender::NO, true));
-  return stitcher;
+// So we can write log[info] instead of log[log::info]
+using namespace yuri::log;
+
+core::Parameters stitcher_module::configure()
+{
+	core::Parameters p = base_type::configure();
+	p.set_description("stitcher_module");
+	p["GPU"]["GPU flag (0/1 - allow GPU usage)"]=1;
+	p["Warper"]["Warper settings (0 - CylindricalWarper / 1 - PlaneWarper / 2 - SphericalWarper)"]=0;
+    p["Blender"]["Use blender to blend the images (0/1 - allow Blender)"]=0;
+    p["Exposure_compensate"]["(0/1 - compensate exposure)"]=0;
+    p["cam_count"]["Number of cameras"]=2;
+//	p->set_max_pipes(-1,1);
+	return p;
 }
 
-Stitcher::Status Stitcher::estimateTransform(InputArrayOfArrays images) {
-  return estimateTransform(images, std::vector<std::vector<Rect> >());
+
+stitcher_module::stitcher_module(log::Log &log_, core::pwThreadBase parent, const core::Parameters &parameters):
+base_type(log_,parent,1,1,std::string("stitcher_module")),GPU_(1),Warper_(0),cam_count_(2),Blender_(0),Exposure_compensate_(0)
+{
+	IOTHREAD_INIT(parameters)
+	resize(cam_count_,1);
 }
 
-Stitcher::Status Stitcher::estimateTransform(
-    InputArrayOfArrays images, const std::vector<std::vector<Rect> > &rois) {
-  images.getUMatVector(imgs_);
-  rois_ = rois;
-
-  Status status;
-
-  if ((status = matchImages()) != OK) return status;
-
-  if ((status = estimateCameraParams()) != OK) return status;
-
-  return OK;
+stitcher_module::~stitcher_module() noexcept
+{
 }
 
-Stitcher::Status Stitcher::composePanorama(OutputArray pano) {
-  return composePanorama(std::vector<UMat>(), pano);
-}
+std::vector<core::pFrame> stitcher_module::do_single_step(std::vector<core::pFrame> framesx)
+{
 
-Stitcher::Status Stitcher::composePanorama(InputArrayOfArrays images,
-                                           OutputArray pano, bool GPU) {
-  if (GPU) {
-    return composePanoramaGPU(images, pano);
-  } else {
-    return composePanorama(images, pano);
-  }
-}
+    if (!stitcherInit){
+        stitcher = cv::Stitcher::createDefault(GPU_);
 
-Stitcher::Status Stitcher::composePanorama(InputArrayOfArrays images,
-                                           OutputArray pano) {
-  int64 t = getTickCount();
+       	if (GPU_){
 
-  std::vector<UMat> imgs;
+			log[log::warning] << "using GPU";
 
-  images.getUMatVector(imgs);
+    		stitcher.setFeaturesMatcher(cv::makePtr<cv::detail::BestOf2NearestMatcher>(true));
 
-  if (!imgs.empty()) {
-    if (imgs.size() != imgs_.size()){
-      return ERR_NEED_MORE_IMGS;
+            if (Exposure_compensate_){
+                
+                stitcher.setExposureCompensator(cv::makePtr<cv::detail::BlocksGainCompensator>());
+            }
+            else {
+                stitcher.setExposureCompensator(cv::makePtr<cv::detail::NoExposureCompensator>());
+            }
+
+            if (Blender_)
+                stitcher.setBlender(cv::makePtr<cv::detail::MultiBandBlender>(true));
+            else
+                stitcher.setBlender(cv::detail::Blender::createDefault(cv::detail::Blender::NO, true));
+    	
+    		if(Warper_ == 0){
+    			stitcher.setWarper(cv::makePtr<cv::CylindricalWarperGpu>());
+    		}
+    		else if (Warper_ == 1){
+    			stitcher.setWarper(cv::makePtr<cv::PlaneWarperGpu>());
+    		}
+    		else if (Warper_ == 2){
+    			stitcher.setWarper(cv::makePtr<cv::SphericalWarperGpu>());
+    		}
+
+    		stitcher.setSeamFinder(cv::makePtr<cv::detail::GraphCutSeamFinderGpu>());
+       	}else {
+
+
+            if (Exposure_compensate_){
+                stitcher.setExposureCompensator(cv::makePtr<cv::detail::BlocksGainCompensator>());
+            }
+            else {
+                stitcher.setExposureCompensator(cv::makePtr<cv::detail::NoExposureCompensator>());
+            }
+
+            if (Blender_)
+                stitcher.setBlender(cv::makePtr<cv::detail::MultiBandBlender>(true));
+            else
+                stitcher.setBlender(cv::detail::Blender::createDefault(cv::detail::Blender::NO, true));
+
+       		if(Warper_ == 0)
+    		  stitcher.setWarper(cv::makePtr<cv::CylindricalWarper>());
+    		else if (Warper_ == 1)
+    		  stitcher.setWarper(cv::makePtr<cv::PlaneWarper>());
+    		else if (Warper_ == 2)
+    		  stitcher.setWarper(cv::makePtr<cv::SphericalWarper>());
+       	}
+
+        log[log::warning] << "Stitcher Init complete.";
+
+        stitcherInit = true;
     }
 
-    UMat img;
 
-    if (firstCall) seam_est_imgs_.resize(imgs.size());
+	const format_t format = framesx[0]->get_format();
 
-    for (size_t i = 0; i < imgs.size(); ++i) {
-      imgs_[i] = imgs[i];
+	const auto& fi = core::raw_format::get_format_info(format);
 
-      if (firstCall) {
-        resize(imgs[i], img, Size(), seam_scale_, seam_scale_);
-        seam_est_imgs_[i] = img.clone();
-      }
+	const size_t frames_no = framesx.size();
+
+	if (fi.planes.size() != 1) {
+		log[log::warning] << "Planar formats not supported";
+		return {};
+	}
+
+	std::vector<core::pRawVideoFrame> frames;
+	for (auto& x: framesx) {
+		auto f = std::dynamic_pointer_cast<core::RawVideoFrame>(x);
+		if (!f) {
+			log[log::warning] << "Received non-raw frame.";
+			return {};
+		}
+		frames.push_back(f);
+	}
+
+	for (size_t i=1;i<frames_no;++i) {
+		if (frames[i]->get_format() != format) {
+			log[log::warning] << "Wrong format for frame in pipe " << i;
+			//frames[i].reset();
+			return {};
+		}
+	}
+
+	std::vector <cv::Mat> matFrames;
+    std::vector<std::vector<cv::Rect>> rois;
+    //std::cout << frames_no << std::endl;
+
+    for (size_t i=0;i<frames_no;++i) {
+       	resolution_t res = frames[i]->get_resolution();
+        cv::Mat in_mat(res.height,res.width,CV_8UC3,PLANE_RAW_DATA(frames[i],0));
+        matFrames.push_back (in_mat);
     }
 
-    std::vector<UMat> seam_est_imgs_subset;
-    std::vector<UMat> imgs_subset;
+    if (!haveTransform){
+        //std::cout << "pictures size : " << matFrames.size() << std::endl;
 
-    for (size_t i = 0; i < indices_.size(); ++i) {
-      imgs_subset.push_back(imgs_[indices_[i]]);
-      if (firstCall)
-        seam_est_imgs_subset.push_back(seam_est_imgs_[indices_[i]]);
-    }
-    if (firstCall) seam_est_imgs_ = seam_est_imgs_subset;
-    imgs_ = imgs_subset;
-  }
-
-  UMat pano_;
-
-  std::vector<Point> corners(imgs_.size());
-  std::vector<UMat> masks_warped(imgs_.size());
-  std::vector<UMat> images_warped(imgs_.size());
-  std::vector<Size> sizes(imgs_.size());
-  std::vector<UMat> masks(imgs_.size());
-
-  // Warp images and their masks
-  w = warper_->create(float(warped_image_scale_ * seam_work_aspect_));
-
-  if (firstCall) {
-    // Prepare image masks
-    for (size_t i = 0; i < imgs_.size(); ++i) {
-      masks[i].create(seam_est_imgs_[i].size(), CV_8U);
-      masks[i].setTo(Scalar::all(255));
-    }
-
-    for (size_t i = 0; i < imgs_.size(); ++i) {
-      Mat_<float> K;
-      cameras_[i].K().convertTo(K, CV_32F);
-      K(0, 0) *= (float)seam_work_aspect_;
-      K(0, 2) *= (float)seam_work_aspect_;
-      K(1, 1) *= (float)seam_work_aspect_;
-      K(1, 2) *= (float)seam_work_aspect_;
-
-      corners[i] = w->warp(seam_est_imgs_[i], K, cameras_[i].R, INTER_LINEAR,
-                           BORDER_CONSTANT, images_warped[i]);
-      sizes[i] = images_warped[i].size();
-
-      w->warp(masks[i], K, cameras_[i].R, INTER_NEAREST, BORDER_CONSTANT,
-              masks_warped[i]);
-    }
-
-    std::vector<UMat> images_warped_f(imgs_.size());
-    for (size_t i = 0; i < imgs_.size(); ++i)
-      images_warped[i].convertTo(images_warped_f[i], CV_32F);
-
-    // Find seams
-    exposure_comp_->feed(corners, images_warped, masks_warped);
-    seam_finder_->find(images_warped_f, corners, masks_warped);
-
-    // Release unused memory
-    seam_est_imgs_.clear();
-    images_warped.clear();
-    images_warped_f.clear();
-    masks.clear();
-
-    for (size_t i = 0; i < imgs_.size(); ++i) {
-      cornersStatic.push_back(corners[i]);
-      masks_warpedStatic.push_back(masks_warped[i].clone());
-      sizesStatic.push_back(sizes[i]);
-      masksStatic.push_back(masks[i].clone());
-    }
-
-  } else {
-    for (size_t i = 0; i < imgs_.size(); ++i) {
-      corners[i] = cornersStatic[i];
-      masks_warped[i] = masks_warpedStatic[i].clone();
-      sizes[i] = sizesStatic[i];
-    }
-  }
-
-  UMat img_warped, img_warped_s;
-  UMat dilated_mask, seam_mask, mask, mask_warped;
-
-  double compose_work_aspect = 1;
-  bool is_blender_prepared = false;
-
-  double compose_scale = 1;
-  bool is_compose_scale_set = false;
-
-  UMat full_img, img;
-  UMat result, result_mask;
-
-  for (size_t img_idx = 0; img_idx < imgs_.size(); ++img_idx) {
-    full_img = imgs_[img_idx];
-    if (firstCall) {
-      if (!is_compose_scale_set) {
-        if (compose_resol_ > 0)
-          compose_scale = std::min(
-              1.0, std::sqrt(compose_resol_ * 1e6 / full_img.size().area()));
-
-        is_compose_scale_set = true;
-
-        compose_work_aspect = compose_scale / work_scale_;
-
-        if (!this->not_first) {
-          warped_image_scale_ *= static_cast<float>(compose_work_aspect);
-          this->not_first = 1;
-
-          w = warper_->create((float)warped_image_scale_);
+        int stat  = stitcher.estimateTransform(matFrames);
+        
+        if (stat != 0){
+            log[log::warning] << "Can't stitch images, error code = " << stat;
+            return {};
+        }else{
+            haveTransform = true;
+            cams = stitcher.cameras();
         }
-
-        for (size_t i = 0; i < imgs_.size(); ++i) {
-          // Update intrinsics
-          cameras_[i].focal *= compose_work_aspect;
-          cameras_[i].ppx *= compose_work_aspect;
-          cameras_[i].ppy *= compose_work_aspect;
-
-          // Update corner and size
-          Size sz = full_img_sizes_[i];
-          if (std::abs(compose_scale - 1) > 1e-1) {
-            sz.width = cvRound(full_img_sizes_[i].width * compose_scale);
-            sz.height = cvRound(full_img_sizes_[i].height * compose_scale);
-          }
-
-          Mat K;
-          cameras_[i].K().convertTo(K, CV_32F);
-          Rect roi = w->warpRoi(sz, K, cameras_[i].R);
-          corners[i] = roi.tl();
-          sizes[i] = roi.size();
-
-          cornersStatic[i] = corners[i];
-          sizesStatic[i] = sizes[i];
-          camerasStatic.push_back(cameras_[i]);
-        }
-      }
-    } else {
-      for (size_t i = 0; i < imgs_.size(); ++i) {
-        corners[i] = cornersStatic[i];
-        sizesStatic[i] = sizesStatic[i];
-        cameras_[i] = (camerasStatic[i]);
-      }
     }
 
-    if (std::abs(compose_scale - 1) > 1e-1) {
-      resize(full_img, img, Size(), compose_scale, compose_scale);
-    } else
-      img = full_img;
-
-    full_img.release();
-    Size img_size = img.size();
-
-    Mat K;
-    Mat xmap, ymap;
-
-    Rect dst_roi;
-
-    if (firstCall) {
-      cameras_[img_idx].K().convertTo(K, CV_32F);
-      dst_roi = w->buildMaps(img.size(), K, cameras_[img_idx].R, xmap, ymap);
-
-      maps.push_back(dst_roi);
-      xmats.push_back(xmap);
-      ymats.push_back(ymap);
-    } else {
-      dst_roi = maps[img_idx];
-      xmap = xmats[img_idx];
-      ymap = ymats[img_idx];
-    }
-
-    img_warped.create(dst_roi.height + 1, dst_roi.width + 1, img.type());
-
-    Size img_warped_size = Size(dst_roi.height + 1, dst_roi.width + 1);
-
-    cv::remap(img, img_warped, xmap, ymap, INTER_LINEAR, BORDER_CONSTANT);
-
-    if (firstCall) {
-      mask.create(img_size, CV_8U);
-      mask.setTo(Scalar::all(255));
-
-      w->warp(mask, K, cameras_[img_idx].R, INTER_NEAREST, BORDER_CONSTANT,
-              mask_warped);
-
-      masksStatic[img_idx] = mask_warped.clone();
-      std::cout << "Saving mask  " << img_idx << std::endl;
-    } else {
-      mask_warped = masksStatic[img_idx];
-    }
-
-    // Compensate exposure
-     exposure_comp_->apply((int)img_idx, corners[img_idx],img_warped,mask_warped);
-
-    img_warped.convertTo(img_warped_s, CV_16S);
-    img_warped.release();
-    img.release();
-    mask.release();
-
-    // Make sure seam mask has proper size
-    dilate(masks_warped[img_idx], dilated_mask, Mat());
-    resize(dilated_mask, seam_mask, mask_warped.size());
-
-    bitwise_and(seam_mask, mask_warped, mask_warped);
-
-    if (!is_blender_prepared) {
-      blender_->prepare(corners, sizes);
-      is_blender_prepared = true;
-    }
-
-    blender_->feed(img_warped_s, mask_warped, corners[img_idx]);
-  }
-
-  blender_->blend(result, result_mask);
-
-  result.convertTo(pano, CV_8U);
-
-  firstCall = false;
-
-  return OK;
-}
-
-
-Stitcher::Status Stitcher::composePanoramaGPU(InputArrayOfArrays images,
-                                           OutputArray pano) {
-  int64 t = getTickCount();
-
-  std::vector<UMat> imgs;
-
-  images.getUMatVector(imgs);
-
-  if (!imgs.empty()) {
-    //CV_Assert(imgs.size() == imgs_.size());
-    if (imgs.size() != imgs_.size()){
-      return ERR_NEED_MORE_IMGS;
-    }
-
-    UMat img;
-
-    if (firstCall) seam_est_imgs_.resize(imgs.size());
-
-    for (size_t i = 0; i < imgs.size(); ++i) {
-      imgs_[i] = imgs[i];
-
-      if (firstCall) {
-        resize(imgs[i], img, Size(), seam_scale_, seam_scale_);
-        seam_est_imgs_[i] = img.clone();
-      }
-    }
-
-    std::vector<UMat> seam_est_imgs_subset;
-    std::vector<UMat> imgs_subset;
-
-    for (size_t i = 0; i < indices_.size(); ++i) {
-      imgs_subset.push_back(imgs_[indices_[i]]);
-      if (firstCall)
-        seam_est_imgs_subset.push_back(seam_est_imgs_[indices_[i]]);
-    }
-    if (firstCall) seam_est_imgs_ = seam_est_imgs_subset;
-    imgs_ = imgs_subset;
-  }
-
-  UMat pano_;
-
-  std::vector<Point> corners(imgs_.size());
-  std::vector<UMat> masks_warped(imgs_.size());
-  std::vector<UMat> images_warped(imgs_.size());
-  std::vector<Size> sizes(imgs_.size());
-  std::vector<UMat> masks(imgs_.size());
-
-  // Warp images and their masks
-  w = warper_->create(float(warped_image_scale_ * seam_work_aspect_));
-
-  if (firstCall) {
-    // Prepare image masks
-    for (size_t i = 0; i < imgs_.size(); ++i) {
-      masks[i].create(seam_est_imgs_[i].size(), CV_8U);
-      masks[i].setTo(Scalar::all(255));
-    }
-
-    for (size_t i = 0; i < imgs_.size(); ++i) {
-      Mat_<float> K;
-      cameras_[i].K().convertTo(K, CV_32F);
-      K(0, 0) *= (float)seam_work_aspect_;
-      K(0, 2) *= (float)seam_work_aspect_;
-      K(1, 1) *= (float)seam_work_aspect_;
-      K(1, 2) *= (float)seam_work_aspect_;
-
-      corners[i] = w->warp(seam_est_imgs_[i], K, cameras_[i].R, INTER_LINEAR,
-                           BORDER_CONSTANT, images_warped[i]);
-      sizes[i] = images_warped[i].size();
-
-      w->warp(masks[i], K, cameras_[i].R, INTER_NEAREST, BORDER_CONSTANT,
-              masks_warped[i]);
-    }
-
-    std::vector<UMat> images_warped_f(imgs_.size());
-    for (size_t i = 0; i < imgs_.size(); ++i)
-      images_warped[i].convertTo(images_warped_f[i], CV_32F);
-
-    // Find seams
-    exposure_comp_->feed(corners, images_warped, masks_warped);
-    seam_finder_->find(images_warped_f, corners, masks_warped);
-
-    // Release unused memory
-    seam_est_imgs_.clear();
-    images_warped.clear();
-    images_warped_f.clear();
-    masks.clear();
-
-    for (size_t i = 0; i < imgs_.size(); ++i) {
-      cornersStatic.push_back(corners[i]);
-      masks_warpedStatic.push_back(masks_warped[i].clone());
-      sizesStatic.push_back(sizes[i]);
-      masksStatic.push_back(masks[i].clone());
-    }
-
-  } else {
-    for (size_t i = 0; i < imgs_.size(); ++i) {
-      corners[i] = cornersStatic[i];
-      masks_warped[i] = masks_warpedStatic[i].clone();
-      sizes[i] = sizesStatic[i];
-    }
-  }
-
-  UMat img_warped, img_warped_s;
-  UMat dilated_mask, seam_mask, mask, mask_warped;
-
-  double compose_work_aspect = 1;
-  bool is_blender_prepared = false;
-
-  double compose_scale = 1;
-  bool is_compose_scale_set = false;
-
-  UMat full_img, img;
-  UMat result, result_mask;
-
-  for (size_t img_idx = 0; img_idx < imgs_.size(); ++img_idx) {
-    full_img = imgs_[img_idx];
-    if (firstCall) {
-      if (!is_compose_scale_set) {
-        if (compose_resol_ > 0)
-          compose_scale = std::min(
-              1.0, std::sqrt(compose_resol_ * 1e6 / full_img.size().area()));
-
-        is_compose_scale_set = true;
-
-        compose_work_aspect = compose_scale / work_scale_;
-
-        if (!this->not_first) {
-          warped_image_scale_ *= static_cast<float>(compose_work_aspect);
-          this->not_first = 1;
-
-          w = warper_->create((float)warped_image_scale_);
-        }
-
-        for (size_t i = 0; i < imgs_.size(); ++i) {
-          // Update intrinsics
-          cameras_[i].focal *= compose_work_aspect;
-          cameras_[i].ppx *= compose_work_aspect;
-          cameras_[i].ppy *= compose_work_aspect;
-
-          // Update corner and size
-          Size sz = full_img_sizes_[i];
-          if (std::abs(compose_scale - 1) > 1e-1) {
-            sz.width = cvRound(full_img_sizes_[i].width * compose_scale);
-            sz.height = cvRound(full_img_sizes_[i].height * compose_scale);
-          }
-
-          Mat K;
-          cameras_[i].K().convertTo(K, CV_32F);
-          Rect roi = w->warpRoi(sz, K, cameras_[i].R);
-          corners[i] = roi.tl();
-          sizes[i] = roi.size();
-
-          cornersStatic[i] = corners[i];
-          sizesStatic[i] = sizes[i];
-          camerasStatic.push_back(cameras_[i]);
-        }
-      }
-    } else {
-      for (size_t i = 0; i < imgs_.size(); ++i) {
-        corners[i] = cornersStatic[i];
-        sizesStatic[i] = sizesStatic[i];
-        cameras_[i] = (camerasStatic[i]);
-      }
-    }
-
-    if (std::abs(compose_scale - 1) > 1e-1) {
-      resize(full_img, img, Size(), compose_scale, compose_scale);
-    } else
-      img = full_img;
-
-    full_img.release();
-    Size img_size = img.size();
-
-    Mat K;
-    Mat xmap, ymap;
-
-    Rect dst_roi;
-
-    if (firstCall) {
-      cameras_[img_idx].K().convertTo(K, CV_32F);
-      dst_roi = w->buildMaps(img.size(), K, cameras_[img_idx].R, xmap, ymap);
-
-      maps.push_back(dst_roi);
-      xmats.push_back(xmap);
-      ymats.push_back(ymap);
-    } else {
-      dst_roi = maps[img_idx];
-      xmap = xmats[img_idx];
-      ymap = ymats[img_idx];
-    }
-
-    img_warped.create(dst_roi.height + 1, dst_roi.width + 1, img.type());
-
-    Size img_warped_size = Size(dst_roi.height + 1, dst_roi.width + 1);
-
-    cv::remap(img, img_warped, xmap, ymap, INTER_LINEAR, BORDER_CONSTANT);
-
-    if (firstCall) {
-      mask.create(img_size, CV_8U);
-      mask.setTo(Scalar::all(255));
-
-      w->warp(mask, K, cameras_[img_idx].R, INTER_NEAREST, BORDER_CONSTANT,
-              mask_warped);
-
-      masksStatic[img_idx] = mask_warped.clone();
-      
-    } else {
-      mask_warped = masksStatic[img_idx];
-    }
-    //std::cout << "1, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec" << std::endl;
-    // Compensate exposure
+    cv::Mat pano;
+    stitcher.setCameras(cams);
     
-    exposure_comp_->apply((int)img_idx, corners[img_idx],img_warped,mask_warped);
+    cv::Stitcher::Status status = stitcher.composePanorama(matFrames, pano, GPU_);
     
-    //std::cout << "2, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec" << std::endl;
-    img_warped.convertTo(img_warped_s, CV_16S);
-    img_warped.release();
-    img.release();
-    mask.release();
+    if (status != cv::Stitcher::OK)
+            {
+                log[log::warning] << "Can't stitch images, error code = " << int(status);
+                haveTransform = false;
+            }
 
-    // Make sure seam mask has proper size
-    dilate(masks_warped[img_idx], dilated_mask, Mat());
-    resize(dilated_mask, seam_mask, mask_warped.size());
-    
-    //std::cout << "3, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec" << std::endl;
+    core::pFrame frame = core::RawVideoFrame::create_empty(core::raw_format::rgb24,
+					{static_cast<dimension_t>(pano.cols), static_cast<dimension_t>(pano.rows)},
+					pano.data,
+					pano.total() * pano.elemSize());
 
-    bitwise_and(seam_mask, mask_warped, mask_warped);
-
-    if (!is_blender_prepared) {
-      blender_->prepare(corners, sizes);
-      is_blender_prepared = true;
-    }
-
-    blender_->feed(img_warped_s, mask_warped, corners[img_idx]);
-    //std::cout << "4, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec" << std::endl;
-  }
-
-  blender_->blend(result, result_mask);
-
-  result.convertTo(pano, CV_8U);
-
-  firstCall = false;
-
-  return OK;
+	return {frame};
+}
+bool stitcher_module::set_param(const core::Parameter& param)
+{
+	if (assign_parameters(param)
+			(GPU_, "GPU")
+			(Warper_, "Warper")
+            (Blender_, "Blender")
+            (Exposure_compensate_, "Exposure_compensate")
+            (cam_count_,"cam_count"))
+		return true;
+	return base_type::set_param(param);
 }
 
+} /* namespace dummy_module */
+} /* namespace yuri */
 
-
-Stitcher::Status Stitcher::stitch(InputArrayOfArrays images, OutputArray pano) {
-  Status status = estimateTransform(images);
-  if (status != OK) return status;
-  return composePanorama(pano);
-}
-
-Stitcher::Status Stitcher::stitch(InputArrayOfArrays images,
-                                  const std::vector<std::vector<Rect> > &rois,
-                                  OutputArray pano) {
-  Status status = estimateTransform(images, rois);
-  if (status != OK) return status;
-  return composePanorama(pano);
-}
-
-Stitcher::Status Stitcher::matchImages() {
-  if ((int)imgs_.size() < 2) {
-    LOGLN("Need more images");
-    return ERR_NEED_MORE_IMGS;
-  }
-
-  work_scale_ = 1;
-  seam_work_aspect_ = 1;
-  seam_scale_ = 1;
-  bool is_work_scale_set = false;
-  bool is_seam_scale_set = false;
-  UMat full_img, img;
-  features_.resize(imgs_.size());
-  seam_est_imgs_.resize(imgs_.size());
-  full_img_sizes_.resize(imgs_.size());
-
-  LOGLN("Finding features...");
-#if ENABLE_LOG
-  int64 t = getTickCount();
-#endif
-
-  for (size_t i = 0; i < imgs_.size(); ++i) {
-    full_img = imgs_[i];
-    full_img_sizes_[i] = full_img.size();
-
-    if (registr_resol_ < 0) {
-      img = full_img;
-      work_scale_ = 1;
-      is_work_scale_set = true;
-    } else {
-      if (!is_work_scale_set) {
-        work_scale_ = std::min(
-            1.0, std::sqrt(registr_resol_ * 1e6 / full_img.size().area()));
-        is_work_scale_set = true;
-      }
-      resize(full_img, img, Size(), work_scale_, work_scale_);
-    }
-    if (!is_seam_scale_set) {
-      seam_scale_ = std::min(
-          1.0, std::sqrt(seam_est_resol_ * 1e6 / full_img.size().area()));
-      seam_work_aspect_ = seam_scale_ / work_scale_;
-      is_seam_scale_set = true;
-    }
-
-    if (rois_.empty())
-      (*features_finder_)(img, features_[i]);
-    else {
-      std::vector<Rect> rois(rois_[i].size());
-      for (size_t j = 0; j < rois_[i].size(); ++j) {
-        Point tl(cvRound(rois_[i][j].x * work_scale_),
-                 cvRound(rois_[i][j].y * work_scale_));
-        Point br(cvRound(rois_[i][j].br().x * work_scale_),
-                 cvRound(rois_[i][j].br().y * work_scale_));
-        rois[j] = Rect(tl, br);
-      }
-      (*features_finder_)(img, features_[i], rois);
-    }
-    features_[i].img_idx = (int)i;
-    LOGLN("Features in image #" << i + 1 << ": "
-                                << features_[i].keypoints.size());
-
-    resize(full_img, img, Size(), seam_scale_, seam_scale_);
-    seam_est_imgs_[i] = img.clone();
-  }
-
-  // Do it to save memory
-  features_finder_->collectGarbage();
-  full_img.release();
-  img.release();
-
-  LOGLN("Finding features, time: "
-        << ((getTickCount() - t) / getTickFrequency()) << " sec");
-
-  LOG("Pairwise matching");
-#if ENABLE_LOG
-  t = getTickCount();
-#endif
-  (*features_matcher_)(features_, pairwise_matches_, matching_mask_);
-  features_matcher_->collectGarbage();
-  LOGLN("Pairwise matching, time: "
-        << ((getTickCount() - t) / getTickFrequency()) << " sec");
-
-  // Leave only images we are sure are from the same panorama
-  indices_ = detail::leaveBiggestComponent(features_, pairwise_matches_,
-                                           (float)conf_thresh_);
-  std::vector<UMat> seam_est_imgs_subset;
-  std::vector<UMat> imgs_subset;
-  std::vector<Size> full_img_sizes_subset;
-  for (size_t i = 0; i < indices_.size(); ++i) {
-    imgs_subset.push_back(imgs_[indices_[i]]);
-    seam_est_imgs_subset.push_back(seam_est_imgs_[indices_[i]]);
-    full_img_sizes_subset.push_back(full_img_sizes_[indices_[i]]);
-  }
-  seam_est_imgs_ = seam_est_imgs_subset;
-  imgs_ = imgs_subset;
-  full_img_sizes_ = full_img_sizes_subset;
-
-  if ((int)imgs_.size() < 2) {
-    LOGLN("Need more images");
-    return ERR_NEED_MORE_IMGS;
-  }
-
-  return OK;
-}
-
-Stitcher::Status Stitcher::estimateCameraParams() {
-  detail::HomographyBasedEstimator estimator;
-  if (!estimator(features_, pairwise_matches_, cameras_))
-    return ERR_HOMOGRAPHY_EST_FAIL;
-
-  for (size_t i = 0; i < cameras_.size(); ++i) {
-    Mat R;
-    cameras_[i].R.convertTo(R, CV_32F);
-    cameras_[i].R = R;
-    // LOGLN("Initial intrinsic parameters #" << indices_[i] + 1 << ":\n " <<
-    // cameras_[i].K());
-  }
-
-  bundle_adjuster_->setConfThresh(conf_thresh_);
-  if (!(*bundle_adjuster_)(features_, pairwise_matches_, cameras_))
-    return ERR_CAMERA_PARAMS_ADJUST_FAIL;
-
-  // Find median focal length and use it as final image scale
-  std::vector<double> focals;
-  for (size_t i = 0; i < cameras_.size(); ++i) {
-    // LOGLN("Camera #" << indices_[i] + 1 << ":\n" << cameras_[i].K());
-    focals.push_back(cameras_[i].focal);
-  }
-
-  std::sort(focals.begin(), focals.end());
-  if (focals.size() % 2 == 1)
-    warped_image_scale_ = static_cast<float>(focals[focals.size() / 2]);
-  else
-    warped_image_scale_ = static_cast<float>(focals[focals.size() / 2 - 1] +
-                                             focals[focals.size() / 2]) *
-                          0.5f;
-
-  if (do_wave_correct_) {
-    std::vector<Mat> rmats;
-    for (size_t i = 0; i < cameras_.size(); ++i)
-      rmats.push_back(cameras_[i].R.clone());
-    detail::waveCorrect(rmats, wave_correct_kind_);
-    for (size_t i = 0; i < cameras_.size(); ++i) cameras_[i].R = rmats[i];
-  }
-
-  return OK;
-}
-
-Ptr<Stitcher> createStitcher(bool try_use_cuda) {
-  Ptr<Stitcher> stitcher = makePtr<Stitcher>();
-  stitcher->setRegistrationResol(0.6);
-  stitcher->setSeamEstimationResol(0.1);
-  stitcher->setCompositingResol(Stitcher::ORIG_RESOL);
-  stitcher->setPanoConfidenceThresh(1);
-  stitcher->setWaveCorrection(true);
-  stitcher->setWaveCorrectKind(detail::WAVE_CORRECT_HORIZ);
-  stitcher->setFeaturesMatcher(
-      makePtr<detail::BestOf2NearestMatcher>(try_use_cuda));
-  stitcher->setBundleAdjuster(makePtr<detail::BundleAdjusterRay>());
-
-#ifdef HAVE_CUDA
-  if (try_use_cuda && cuda::getCudaEnabledDeviceCount() > 0) {
-#ifdef HAVE_OPENCV_NONFREE
-    stitcher->setFeaturesFinder(makePtr<detail::SurfFeaturesFinderGpu>());
-#else
-    stitcher->setFeaturesFinder(makePtr<detail::OrbFeaturesFinder>());
-#endif
-    stitcher->setWarper(makePtr<SphericalWarperGpu>());
-    stitcher->setSeamFinder(makePtr<detail::GraphCutSeamFinderGpu>());
-  } else
-#endif
-  {
-#ifdef HAVE_OPENCV_NONFREE
-    stitcher->setFeaturesFinder(makePtr<detail::SurfFeaturesFinder>());
-#else
-    stitcher->setFeaturesFinder(makePtr<detail::OrbFeaturesFinder>());
-#endif
-    stitcher->setWarper(makePtr<SphericalWarper>());
-    stitcher->setSeamFinder(makePtr<detail::GraphCutSeamFinder>(
-        detail::GraphCutSeamFinderBase::COST_COLOR));
-  }
-
-  stitcher->setExposureCompensator(makePtr<detail::BlocksGainCompensator>());
-  stitcher->setBlender(makePtr<detail::MultiBandBlender>(try_use_cuda));
-
-  return stitcher;
-}
-}  // namespace cv
