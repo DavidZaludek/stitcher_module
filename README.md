@@ -11,9 +11,13 @@ Stitcher takes in images in jpeg format and outputs one composed by stitching in
 Run flags: 
 
 GPU - Module can speed up the calculations by using gpu acceleration. this flag toggels GPU use ON/OFF.
+
 Warpers - OpenCV stitching has 3 Warper settings (0 - CylindricalWarper / 1 - PlaneWarper / 2 - SphericalWarper).
+
 cam_count - Number of cameras used.
+
 Blender - Use blender to smoothen the edges(1 - true/0 - false).
+
 Exposure_compensate - Use exposure compensator to set images exposure(1 - true/0 - false).
 
 Current Framerates after procesing times: 
